@@ -159,10 +159,13 @@ body {
   margin-bottom: 24px;
 }
 
-.sidebar-logo svg {
-  width: 24px;
-  height: 24px;
-  color: var(--accent);
+.sidebar-logo img {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-sm);
+  object-fit: contain;
+  background-color: #ffffff;
+  flex-shrink: 0;
 }
 
 .sidebar-logo h1 {
@@ -387,10 +390,13 @@ body {
   gap: 8px;
 }
 
-.mobile-logo svg {
-  width: 28px;
-  height: 28px;
-  color: var(--accent);
+.mobile-logo img {
+  width: 34px;
+  height: 34px;
+  border-radius: var(--radius-sm);
+  object-fit: contain;
+  background-color: #ffffff;
+  flex-shrink: 0;
 }
 
 .mobile-logo h1 {
@@ -805,6 +811,45 @@ label {
   flex-shrink: 0;
 }
 
+.auth-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 22px 0;
+  color: var(--text-sub);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+.auth-divider::before,
+.auth-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background-color: var(--border-color);
+}
+
+.btn-google {
+  background-color: #ffffff;
+  border-color: #e2e8f0;
+  color: #1f2937;
+  box-shadow: var(--shadow-sm);
+}
+
+.btn-google:hover:not(:disabled) {
+  background-color: #f8fafc;
+  border-color: #cbd5e1;
+  color: #111827;
+  transform: translateY(-1px);
+}
+
+.btn-google svg {
+  width: 18px;
+  height: 18px;
+}
+
 
 /* -----------------------------------------------
    DRAG & DROP ZONE
@@ -1211,10 +1256,13 @@ label {
   gap: 12px;
 }
 
-.auth-hero-logo svg {
-  width: 28px;
-  height: 28px;
-  color: var(--accent);
+.auth-hero-logo img {
+  width: 42px;
+  height: 42px;
+  border-radius: var(--radius-sm);
+  object-fit: contain;
+  background-color: #ffffff;
+  flex-shrink: 0;
 }
 
 .auth-hero-logo h2 {

@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  GoogleAuthProvider,
   onAuthStateChanged,
   signInWithEmailAndPassword,
+  signInWithPopup,
   signOut,
 } from "firebase/auth";
 import { ref as dbRef, onValue, set } from "firebase/database";
@@ -215,6 +217,20 @@ function MenuIcon() {
   );
 }
 
+function GoogleIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path fill="#4285F4" d="M21.6 12.23c0-.78-.07-1.53-.2-2.23H12v4.22h5.38a4.6 4.6 0 0 1-2 3.02v2.51h3.24c1.9-1.75 2.98-4.32 2.98-7.52z" />
+      <path fill="#34A853" d="M12 22c2.7 0 4.97-.9 6.62-2.44l-3.24-2.51c-.9.6-2.04.95-3.38.95-2.6 0-4.8-1.76-5.59-4.12H3.06v2.59A10 10 0 0 0 12 22z" />
+      <path fill="#FBBC05" d="M6.41 13.88A6 6 0 0 1 6.09 12c0-.65.11-1.28.32-1.88V7.53H3.06A10 10 0 0 0 2 12c0 1.61.39 3.14 1.06 4.47l3.35-2.59z" />
+      <path fill="#EA4335" d="M12 6c1.47 0 2.8.51 3.84 1.51l2.87-2.87C16.97 3.02 14.7 2 12 2a10 10 0 0 0-8.94 5.53l3.35 2.59C7.2 7.76 9.4 6 12 6z" />
+    </svg>
+  );
+}
+
+const googleProvider = new GoogleAuthProvider();
+googleProvider.setCustomParameters({ prompt: "select_account" });
+
 export default function App() {
   const [user, setUser] = useState(null);
   const [checkingAuth, setCheckingAuth] = useState(true);
@@ -222,6 +238,7 @@ export default function App() {
   const [password, setPassword] = useState("");
   const [authError, setAuthError] = useState("");
   const [signingIn, setSigningIn] = useState(false);
+  const [googleSigningIn, setGoogleSigningIn] = useState(false);
 
   // ── Data state ───────────────────────────────
   const [diseaseHistory, setDiseaseHistory] = useState([]);
@@ -248,6 +265,7 @@ export default function App() {
 
   // ── Loading flags ─────────────────────────────
   const [loadingPlantUpload, setLoadingPlantUpload] = useState(false);
+  const authBusy = signingIn || googleSigningIn;
 
   const plantFileInputRef = useRef(null);
 
@@ -316,9 +334,25 @@ export default function App() {
     } catch (err) {
       console.error("Sign in failed:", err);
       setAuthError("Sign in failed. Check the email and password, then try again.");
-      addToast("Verification failed", "error");
+      addToast("Sign in failed", "error");
     } finally {
       setSigningIn(false);
+    }
+  };
+
+  const handleGoogleSignIn = async () => {
+    setAuthError("");
+    setGoogleSigningIn(true);
+
+    try {
+      await signInWithPopup(auth, googleProvider);
+      addToast("Successfully authenticated with Google", "success");
+    } catch (err) {
+      console.error("Google sign in failed:", err);
+      setAuthError("Google sign in failed. Please try again.");
+      addToast("Google sign in failed", "error");
+    } finally {
+      setGoogleSigningIn(false);
     }
   };
 
@@ -469,9 +503,7 @@ export default function App() {
       <div className="auth-page-container">
         <div className="auth-hero-panel">
           <div className="auth-hero-logo">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-            </svg>
+            <img src="/agroguard-logo.jpeg" alt="AgrouGuard AI logo" />
             <h2>Agro<span>guard AI</span></h2>
           </div>
           <div className="auth-hero-content">
@@ -494,7 +526,7 @@ export default function App() {
             <p>Please enter your access credentials to view the diagnostics panel.</p>
             
             <div className="auth-input-group">
-              <label htmlFor="email-input">Operator Email</label>
+              <label htmlFor="email-input">Email</label>
               <input
                 id="email-input"
                 type="email"
@@ -508,7 +540,7 @@ export default function App() {
             </div>
             
             <div className="auth-input-group" style={{ marginBottom: '8px' }}>
-              <label htmlFor="pass-input">Station Key Code</label>
+              <label htmlFor="pass-input">Password</label>
               <input
                 id="pass-input"
                 type="password"
@@ -532,8 +564,14 @@ export default function App() {
               </div>
             )}
             
-            <button className="btn-primary" type="submit" disabled={signingIn} style={{ marginTop: '32px' }}>
-              {signingIn ? <div className="spinner" /> : "Verify Security Key"}
+            <button className="btn-primary" type="submit" disabled={authBusy} style={{ marginTop: '32px' }}>
+              {signingIn ? <div className="spinner" /> : "Sign In"}
+            </button>
+
+            <div className="auth-divider">or</div>
+
+            <button className="btn-outline btn-google" type="button" onClick={handleGoogleSignIn} disabled={authBusy}>
+              {googleSigningIn ? <div className="spinner spinner-accent" /> : <><GoogleIcon /> Sign in with Google</>}
             </button>
           </form>
         </div>
@@ -550,9 +588,7 @@ export default function App() {
       {/* ── Desktop Sidebar ── */}
       <aside className={`sidebar ${mobileMenuOpen ? "mobile-open" : ""}`}>
         <div className="sidebar-logo">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-          </svg>
+          <img src="/agroguard-logo.jpeg" alt="AgrouGuard AI logo" />
           <h1>Agro<span>guard AI</span></h1>
         </div>
 
@@ -597,9 +633,7 @@ export default function App() {
       {/* ── Mobile Header Bar ── */}
       <header className="mobile-header">
         <div className="mobile-logo">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-          </svg>
+          <img src="/agroguard-logo.jpeg" alt="AgrouGuard AI logo" />
           <h1>Agro<span>guard AI</span></h1>
         </div>
         <button
