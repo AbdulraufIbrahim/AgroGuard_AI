@@ -1,5 +1,3 @@
-import fs from 'fs';
-
 async function test() {
   try {
     const formData = new FormData();

@@ -1,452 +1,995 @@
 import { useEffect, useRef, useState } from "react";
+import {
+  onAuthStateChanged,
+  signInWithEmailAndPassword,
+  signOut,
+} from "firebase/auth";
 import { ref as dbRef, onValue, set } from "firebase/database";
-import { ref as storageRef, uploadBytes, getDownloadURL } from "firebase/storage";
-import { db, storage } from "./firebase";
+import { auth, db } from "./firebase";
 
-// ─────────────────────────────────────────────
-// How old a "lastSeen" timestamp can be (ms)
-// before the device is considered offline.
-// The ESP polls every 3 s; 15 s gives 5 missed
-// polls before we call it offline.
-// ─────────────────────────────────────────────
-const ONLINE_THRESHOLD_MS = 15_000;
+const HF_PREDICT_URL = "https://AbdulraufIbrahim-plant-disease-api.hf.space/predict";
 
-function isDeviceOnline(deviceStatus) {
-  if (!deviceStatus) return false;
-  // The ESP now sets online:true only when connected,
-  // but we additionally check the lastSeen heartbeat
-  // so the badge goes offline if the ESP disappears.
-  const lastSeen = deviceStatus.lastSeen;
-  if (!lastSeen) return Boolean(deviceStatus.online);
-  // lastSeen is an ISO-like string "YYYY-MM-DD HH:MM:SS"
-  // stored in UTC (ESP uses UTC via NTP).
-  const parsed = Date.parse(lastSeen.replace(" ", "T") + "Z");
-  if (isNaN(parsed)) return Boolean(deviceStatus.online);
-  return Date.now() - parsed < ONLINE_THRESHOLD_MS;
+// ────────────────────────────────────────────────────────
+// HELPER FUNCTIONS
+// ────────────────────────────────────────────────────────
+function readImageAsDataUrl(file, maxWidth = 400, quality = 0.6) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const objectUrl = URL.createObjectURL(file);
+
+    img.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+      const canvas = document.createElement("canvas");
+      const scaleSize = Math.min(1, maxWidth / img.width);
+
+      canvas.width = Math.round(img.width * scaleSize);
+      canvas.height = Math.round(img.height * scaleSize);
+
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      resolve(canvas.toDataURL("image/jpeg", quality));
+    };
+
+    img.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      reject(new Error("Failed to read image."));
+    };
+
+    img.src = objectUrl;
+  });
+}
+
+function getDisplayImageSrc(imageValue) {
+  if (typeof imageValue !== "string" || !imageValue.trim()) return "";
+  if (imageValue.startsWith("data:image")) return imageValue;
+  if (imageValue.startsWith("http://") || imageValue.startsWith("https://")) {
+    return imageValue;
+  }
+  return "data:image/jpeg;base64," + imageValue;
+}
+
+function getEventTimeMs(event) {
+  if (typeof event?.timestampEpoch === "number") return event.timestampEpoch * 1000;
+  if (typeof event?.lastSeenEpoch === "number") return event.lastSeenEpoch * 1000;
+  if (!event?.timestamp) return 0;
+  const parsed = Date.parse(String(event.timestamp).replace(" ", "T"));
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+function toSortedEventList(data) {
+  return Object.values(data || {})
+    .filter((event) => event && typeof event === "object")
+    .sort((a, b) => getEventTimeMs(b) - getEventTimeMs(a));
+}
+
+function formatConfidence(confidence) {
+  const value = Number(confidence);
+  return Number.isFinite(value) ? `${(value * 100).toFixed(2)}%` : "0.00%";
+}
+
+// ────────────────────────────────────────────────────────
+// SVG ICON COMPONENTS
+// ────────────────────────────────────────────────────────
+function ShieldIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+    </svg>
+  );
+}
+
+function DashboardIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="3" width="7" height="9" />
+      <rect x="14" y="3" width="7" height="5" />
+      <rect x="14" y="12" width="7" height="9" />
+      <rect x="3" y="16" width="7" height="5" />
+    </svg>
+  );
+}
+
+function ScanIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
+      <circle cx="12" cy="13" r="4" />
+    </svg>
+  );
+}
+
+function HistoryIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 8v4l3 3" />
+      <path d="M3.05 11a9 9 0 1 1 .5 4m-.5 5v-5h5" />
+    </svg>
+  );
+}
+
+function SunIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="5" />
+      <line x1="12" y1="1" x2="12" y2="3" />
+      <line x1="12" y1="21" x2="12" y2="23" />
+      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" />
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
+      <line x1="1" y1="12" x2="3" y2="12" />
+      <line x1="21" y1="12" x2="23" y2="12" />
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" />
+      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
+    </svg>
+  );
+}
+
+// Dark Mode Moon Icon
+function MoonIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+    </svg>
+  );
+}
+
+function LogOutIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+      <polyline points="16 17 21 12 16 7" />
+      <line x1="21" y1="12" x2="9" y2="12" />
+    </svg>
+  );
+}
+
+function ChevronLeftIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="15 18 9 12 15 6" />
+    </svg>
+  );
+}
+
+function ChevronRightIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="9 18 15 12 9 6" />
+    </svg>
+  );
+}
+
+function UploadIcon({ className }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+      <polyline points="17 8 12 3 7 8" />
+      <line x1="12" y1="3" x2="12" y2="15" />
+    </svg>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="20 6 9 17 4 12" />
+    </svg>
+  );
+}
+
+function ErrorIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="10" />
+      <line x1="15" y1="9" x2="9" y2="15" />
+      <line x1="9" y1="9" x2="15" y2="15" />
+    </svg>
+  );
+}
+
+function InfoIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="10" />
+      <line x1="12" y1="16" x2="12" y2="12" />
+      <line x1="12" y1="8" x2="12.01" y2="8" />
+    </svg>
+  );
+}
+
+function CloseIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="18" y1="6" x2="6" y2="18" />
+      <line x1="6" y1="6" x2="18" y2="18" />
+    </svg>
+  );
+}
+
+function MenuIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="3" y1="12" x2="21" y2="12" />
+      <line x1="3" y1="6" x2="21" y2="6" />
+      <line x1="3" y1="18" x2="21" y2="18" />
+    </svg>
+  );
 }
 
 export default function App() {
-  // ── Control state ────────────────────────────
-  const [intruderArmed, setIntruderArmed] = useState(false);
-  const [scheduleActive, setScheduleActive] = useState(false);
-  const [intervalSec, setIntervalSec] = useState(60);
-  const [durationMin, setDurationMin] = useState(10);
+  const [user, setUser] = useState(null);
+  const [checkingAuth, setCheckingAuth] = useState(true);
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [authError, setAuthError] = useState("");
+  const [signingIn, setSigningIn] = useState(false);
 
   // ── Data state ───────────────────────────────
-  const [diseaseLatest, setDiseaseLatest] = useState(null);
-  const [intruderLatest, setIntruderLatest] = useState(null);
-  const [intruderImageUrl, setIntruderImageUrl] = useState(null);
-  const [deviceStatus, setDeviceStatus] = useState(null);
-  const [latestStatus, setLatestStatus] = useState(null);
+  const [diseaseHistory, setDiseaseHistory] = useState([]);
+  const [imagePreview, setImagePreview] = useState(null);
 
-  // ── Online badge (re-checked every 5 s) ──────
-  const [isOnline, setIsOnline] = useState(false);
-  const deviceStatusRef = useRef(null);
+  // ── Pagination state ──────────────────────────
+  const [diseasePage, setDiseasePage] = useState(0);
+
+  // ── Theme / Nav state ─────────────────────────
+  const [darkMode, setDarkMode] = useState(true);
+  const [activeSection, setActiveSection] = useState("overview");
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+
+  // ── Toast Alert state ─────────────────────────
+  const [toasts, setToasts] = useState([]);
+
+  // ── Drag & drop upload state ──────────────────
+  const [dragActive, setDragActive] = useState(false);
+
+  // ── Browser Camera State ──────────────────────
+  const [cameraActive, setCameraActive] = useState(false);
+  const [videoStream, setVideoStream] = useState(null);
+  const videoRef = useRef(null);
 
   // ── Loading flags ─────────────────────────────
-  const [loadingDiseaseSnap, setLoadingDiseaseSnap] = useState(false);
-  const [loadingIntruderSnap, setLoadingIntruderSnap] = useState(false);
   const [loadingPlantUpload, setLoadingPlantUpload] = useState(false);
-  const [plantUploadResult, setPlantUploadResult] = useState(null);
 
   const plantFileInputRef = useRef(null);
 
-  // ── Firebase listeners ────────────────────────
   useEffect(() => {
-    const unsubControl = onValue(dbRef(db, "control"), (snap) => {
-      const data = snap.val() || {};
-      setIntruderArmed(Boolean(data.intruderArmed));
-      setScheduleActive(Boolean(data.diseaseScheduleActive));
+    document.body.setAttribute("data-theme", darkMode ? "dark" : "light");
+  }, [darkMode]);
+
+  // Auth handler
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      setCheckingAuth(false);
     });
-
-    const unsubConfig = onValue(dbRef(db, "config"), (snap) => {
-      const data = snap.val() || {};
-      setIntervalSec(data.diseaseIntervalSec || 60);
-      setDurationMin(data.diseaseDurationMin || 10);
-    });
-
-    const unsubDisease = onValue(dbRef(db, "disease/latest"), (snap) => {
-      setDiseaseLatest(snap.val());
-    });
-
-    // Manual plant-upload result lives under plant/manual/latest
-    const unsubPlantManual = onValue(dbRef(db, "plant/manual/latest"), (snap) => {
-      setPlantUploadResult(snap.val());
-    });
-
-    const unsubIntruder = onValue(dbRef(db, "intruder/latest"), (snap) => {
-      setIntruderLatest(snap.val());
-    });
-
-    // Intruder image URL stored by the ESP after uploading to Firebase Storage
-    const unsubIntruderImage = onValue(dbRef(db, "intruder/latestImageUrl"), (snap) => {
-      setIntruderImageUrl(snap.val());
-    });
-
-    const unsubDevice = onValue(dbRef(db, "status/device"), (snap) => {
-      const val = snap.val();
-      deviceStatusRef.current = val;
-      setDeviceStatus(val);
-      setIsOnline(isDeviceOnline(val));
-    });
-
-    const unsubLatestStatus = onValue(dbRef(db, "status/latest"), (snap) => {
-      setLatestStatus(snap.val());
-    });
-
-    // Re-evaluate online status every 5 s so the badge
-    // reacts when the heartbeat stops arriving.
-    const ticker = setInterval(() => {
-      setIsOnline(isDeviceOnline(deviceStatusRef.current));
-    }, 5_000);
-
-    return () => {
-      unsubControl();
-      unsubConfig();
-      unsubDisease();
-      unsubPlantManual();
-      unsubIntruder();
-      unsubIntruderImage();
-      unsubDevice();
-      unsubLatestStatus();
-      clearInterval(ticker);
-    };
+    return unsubscribe;
   }, []);
 
-  // ── Control actions ───────────────────────────
-  const updateIntruderArmed = (value) =>
-    set(dbRef(db, "control/intruderArmed"), value);
+  // Firebase Realtime DB History Listener
+  useEffect(() => {
+    if (!user) {
+      setTimeout(() => {
+        setDiseaseHistory([]);
+      }, 0);
+      return undefined;
+    }
 
-  const updateScheduleActive = (value) =>
-    set(dbRef(db, "control/diseaseScheduleActive"), value);
+    const unsubDisease = onValue(dbRef(db, "disease/history"), (snap) => {
+      setDiseaseHistory(toSortedEventList(snap.val()));
+    });
 
-  const saveScheduleSettings = async () => {
-    let safeInterval = Math.max(10, Number(intervalSec));
-    let safeDuration = Math.max(1, Number(durationMin));
-    await set(dbRef(db, "config/diseaseIntervalSec"), safeInterval);
-    await set(dbRef(db, "config/diseaseDurationMin"), safeDuration);
-    alert("Disease schedule settings saved.");
+    return () => {
+      unsubDisease();
+    };
+  }, [user]);
+
+  // Cleanup camera stream on unmount
+  useEffect(() => {
+    return () => {
+      if (videoStream) {
+        videoStream.getTracks().forEach((track) => track.stop());
+      }
+    };
+  }, [videoStream]);
+
+  // Toast Helpers
+  const addToast = (message, type = "info") => {
+    const id = Date.now();
+    setToasts((prev) => [...prev, { id, message, type }]);
+    setTimeout(() => {
+      setToasts((prev) => prev.filter((t) => t.id !== id));
+    }, 4000);
   };
 
-  const manualDiseaseSnap = async () => {
-    setLoadingDiseaseSnap(true);
-    await set(dbRef(db, "commands/diseaseSnap"), true);
-    setTimeout(() => setLoadingDiseaseSnap(false), 4000);
+  const removeToast = (id) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
   };
 
-  const manualIntruderSnap = async () => {
-    setLoadingIntruderSnap(true);
-    await set(dbRef(db, "commands/intruderSnap"), true);
-    setTimeout(() => setLoadingIntruderSnap(false), 4000);
+  const handleSignIn = async (event) => {
+    event.preventDefault();
+    setAuthError("");
+    setSigningIn(true);
+
+    try {
+      await signInWithEmailAndPassword(auth, email.trim(), password);
+      setPassword("");
+      addToast("Successfully authenticated", "success");
+    } catch (err) {
+      console.error("Sign in failed:", err);
+      setAuthError("Sign in failed. Check the email and password, then try again.");
+      addToast("Verification failed", "error");
+    } finally {
+      setSigningIn(false);
+    }
   };
 
-  // ── Manual plant-image upload ─────────────────
-  // 1. User picks a file from their device.
-  // 2. File is uploaded to Firebase Storage under plant/manual/<timestamp>.jpg
-  // 3. Download URL is stored at plant/manual/uploadUrl in the database.
-  // 4. The ESP polls /commands/plantManualSnap; when it finds a URL there
-  //    it downloads the image, sends it to Hugging Face, then writes the
-  //    result to /plant/manual/latest — which the dashboard listens to above.
-  //
-  // NOTE: If you prefer the ESP to capture the image itself instead of
-  //       accepting an uploaded file, use the manualDiseaseSnap button above.
-  const handlePlantFileChange = async (e) => {
-    const file = e.target.files?.[0];
+  // Upload crop logic
+  const handlePlantFile = async (file) => {
     if (!file) return;
 
     setLoadingPlantUpload(true);
     try {
-      const timestamp = Date.now();
-      const path = `plant/manual/${timestamp}.jpg`;
-      const sRef = storageRef(storage, path);
-      await uploadBytes(sRef, file, { contentType: file.type || "image/jpeg" });
-      const downloadUrl = await getDownloadURL(sRef);
+      const formData = new FormData();
+      formData.append("file", file, file.name || "plant.jpg");
 
-      // Tell the ESP the URL of the uploaded image so it can send it to HF.
-      await set(dbRef(db, "commands/plantManualUploadUrl"), downloadUrl);
-      await set(dbRef(db, "commands/plantManualSnap"), true);
+      const response = await fetch(HF_PREDICT_URL, {
+        method: "POST",
+        body: formData,
+      });
 
-      alert("Plant image uploaded! Waiting for disease analysis from ESP32…");
+      if (!response.ok) {
+        throw new Error(`Hugging Face returned HTTP ${response.status}`);
+      }
+
+      const result = await response.json();
+      const timestamp = new Date().toISOString().replace("T", " ").slice(0, 19);
+      const imageUrl = await readImageAsDataUrl(file);
+      const diseaseEvent = {
+        label: result.label || "unknown",
+        confidence: Number(result.confidence || 0),
+        source: "dashboard upload",
+        timestamp,
+        imageUrl,
+      };
+
+      const eventKey = String(Date.now());
+      await set(dbRef(db, "disease/latest"), diseaseEvent);
+      await set(dbRef(db, `disease/history/${eventKey}`), diseaseEvent);
+
+      addToast("Plant photo analyzed successfully.", "success");
     } catch (err) {
       console.error("Plant upload failed:", err);
-      alert("Upload failed: " + err.message);
+      addToast("Analysis failed: " + err.message, "error");
     } finally {
       setLoadingPlantUpload(false);
-      // Reset file input so the same file can be re-selected if needed.
       if (plantFileInputRef.current) plantFileInputRef.current.value = "";
     }
   };
 
-  const confidencePercent = diseaseLatest?.confidence
-    ? (Number(diseaseLatest.confidence) * 100).toFixed(2)
-    : "0.00";
+  const handlePlantFileChange = (e) => {
+    const file = e.target.files?.[0];
+    if (file) handlePlantFile(file);
+  };
 
-  const manualConfidencePercent = plantUploadResult?.confidence
-    ? (Number(plantUploadResult.confidence) * 100).toFixed(2)
-    : "0.00";
+  // Drag & drop handlers
+  const handleDrag = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.type === "dragenter" || e.type === "dragover") {
+      setDragActive(true);
+    } else if (e.type === "dragleave") {
+      setDragActive(false);
+    }
+  };
 
+  const handleDrop = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragActive(false);
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+      handlePlantFile(e.dataTransfer.files[0]);
+    }
+  };
+
+  // ── Browser Camera Operations ─────────────────
+  const startCamera = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "environment" },
+      });
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+      }
+      setVideoStream(stream);
+      setCameraActive(true);
+      addToast("Live camera viewport active", "info");
+    } catch (err) {
+      console.error("Camera access failed:", err);
+      addToast("Could not access camera device", "error");
+    }
+  };
+
+  const stopCamera = () => {
+    if (videoStream) {
+      videoStream.getTracks().forEach((track) => track.stop());
+    }
+    setVideoStream(null);
+    setCameraActive(false);
+  };
+
+  const captureCameraSnapshot = async () => {
+    if (!videoRef.current) return;
+    setLoadingPlantUpload(true);
+    try {
+      const canvas = document.createElement("canvas");
+      const videoEl = videoRef.current;
+      
+      canvas.width = videoEl.videoWidth || 640;
+      canvas.height = videoEl.videoHeight || 480;
+      
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
+      
+      const dataUrl = canvas.toDataURL("image/jpeg", 0.7);
+      const blob = await fetch(dataUrl).then((r) => r.blob());
+      const file = new File([blob], "camera-snap.jpg", { type: "image/jpeg" });
+      
+      await handlePlantFile(file);
+      stopCamera();
+    } catch (err) {
+      console.error("Snapshot capture failed:", err);
+      addToast("Failed to snap snapshot: " + err.message, "error");
+      setLoadingPlantUpload(false);
+    }
+  };
+
+  // Data helpers for pagination
+  const diseasePageCount = Math.max(1, Math.ceil(diseaseHistory.length / 10));
+  const activeDiseasePage = Math.min(diseasePage, diseasePageCount - 1);
+
+  const currentDiseaseEvents = diseaseHistory.slice(
+    activeDiseasePage * 10,
+    (activeDiseasePage + 1) * 10,
+  );
+
+  const latestDiseaseEvent = diseaseHistory[0];
+
+  // Checking Authentication loading cover
+  if (checkingAuth) {
+    return (
+      <div className="authPage" style={{ display: 'flex', flexDirection: 'column', gap: '16px', justifyContent: 'center', alignItems: 'center', height: '100vh', background: 'var(--bg-page)' }}>
+        <div className="spinner spinner-accent" style={{ width: '42px', height: '42px', borderWidth: '3px' }} />
+        <h2 style={{ fontFamily: 'var(--font-heading)', color: 'var(--text-heading)', fontSize: '18px', fontWeight: '700' }}>Securing Connection...</h2>
+      </div>
+    );
+  }
+
+  // Not logged in screen
+  if (!user) {
+    return (
+      <div className="auth-page-container">
+        <div className="auth-hero-panel">
+          <div className="auth-hero-logo">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+            </svg>
+            <h2>Agro<span>guard AI</span></h2>
+          </div>
+          <div className="auth-hero-content">
+            <div className="auth-hero-quote">
+              <h3>Precision agriculture crop health & leaf disease classification</h3>
+              <p>
+                Capture leaf snapshots in real-time or upload photos to classify crop infections instantly using Hugging Face AI.
+              </p>
+            </div>
+          </div>
+          <div className="auth-hero-footer">
+            &copy; 2026 Agroguard AI System. All rights reserved.
+          </div>
+        </div>
+        
+        <div className="auth-form-panel">
+          <form className="auth-form-card" onSubmit={handleSignIn}>
+            <span>Smart Farm Access</span>
+            <h2>Welcome Back</h2>
+            <p>Please enter your access credentials to view the diagnostics panel.</p>
+            
+            <div className="auth-input-group">
+              <label htmlFor="email-input">Operator Email</label>
+              <input
+                id="email-input"
+                type="email"
+                className="input-field"
+                placeholder="operator@agroguard.ai"
+                autoComplete="email"
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+                required
+              />
+            </div>
+            
+            <div className="auth-input-group" style={{ marginBottom: '8px' }}>
+              <label htmlFor="pass-input">Station Key Code</label>
+              <input
+                id="pass-input"
+                type="password"
+                className="input-field"
+                placeholder="••••••••"
+                autoComplete="current-password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                required
+              />
+            </div>
+            
+            {authError && (
+              <div className="auth-error-alert">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="12" cy="12" r="10" />
+                  <line x1="12" y1="8" x2="12" y2="12" />
+                  <line x1="12" y1="16" x2="12.01" y2="16" />
+                </svg>
+                <span>{authError}</span>
+              </div>
+            )}
+            
+            <button className="btn-primary" type="submit" disabled={signingIn} style={{ marginTop: '32px' }}>
+              {signingIn ? <div className="spinner" /> : "Verify Security Key"}
+            </button>
+          </form>
+        </div>
+      </div>
+    );
+  }
+
+  // ────────────────────────────────────────────────────────
+  // AUTHENTICATED PANEL SHELL
+  // ────────────────────────────────────────────────────────
   return (
-    <div className="page">
-      {/* ── Header ── */}
-      <header className="header">
-        <div>
-          <h1>ESP32-CAM Disease + Intruder Dashboard</h1>
-          <p>
-            Control disease detection schedule, manual snaps, and intruder
-            monitoring.
-          </p>
+    <div className="app-container">
+      
+      {/* ── Desktop Sidebar ── */}
+      <aside className={`sidebar ${mobileMenuOpen ? "mobile-open" : ""}`}>
+        <div className="sidebar-logo">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+          </svg>
+          <h1>Agro<span>guard AI</span></h1>
         </div>
 
-        <div className={isOnline ? "badge online" : "badge offline"}>
-          <span className={isOnline ? "pulse-dot green" : "pulse-dot red"} />
-          {isOnline ? "ESP32 Online" : "ESP32 Offline"}
-        </div>
-      </header>
+        <nav className="sidebar-nav">
+          <button
+            type="button"
+            className={`sidebar-nav-item ${activeSection === "overview" ? "active" : ""}`}
+            onClick={() => { setActiveSection("overview"); setMobileMenuOpen(false); }}
+          >
+            <DashboardIcon />
+            Overview
+          </button>
+          <button
+            type="button"
+            className={`sidebar-nav-item ${activeSection === "analysis" ? "active" : ""}`}
+            onClick={() => { setActiveSection("analysis"); setMobileMenuOpen(false); }}
+          >
+            <ScanIcon />
+            Plant Diagnosis
+          </button>
+          <button
+            type="button"
+            className={`sidebar-nav-item ${activeSection === "history" ? "active" : ""}`}
+            onClick={() => { setActiveSection("history"); setMobileMenuOpen(false); }}
+          >
+            <HistoryIcon />
+            Diagnosis History
+          </button>
+        </nav>
 
-      <section className="grid">
-        {/* ── Device Status ── */}
-        <div className="card">
-          <h2>Device Status</h2>
-          <p className="statusText">
-            {latestStatus?.message || "Waiting for ESP32-CAM…"}
-          </p>
-          <small>{latestStatus?.timestamp || "No timestamp"}</small>
-
-          <div className="miniGrid">
-            <div>
-              <span>Intruder Mode</span>
-              <strong>{intruderArmed ? "🔴 Armed" : "🟢 Disarmed"}</strong>
-            </div>
-            <div>
-              <span>Disease Schedule</span>
-              <strong>{scheduleActive ? "▶ Running" : "■ Stopped"}</strong>
-            </div>
-            <div>
-              <span>Last Seen</span>
-              <strong>{deviceStatus?.lastSeen || "—"}</strong>
-            </div>
-            <div>
-              <span>Interval / Duration</span>
-              <strong>
-                {deviceStatus?.diseaseIntervalSec ?? intervalSec}s /{" "}
-                {deviceStatus?.diseaseDurationMin ?? durationMin}min
-              </strong>
+        <div className="sidebar-footer">
+          <div className="device-badge-sidebar online">
+            <span className="pulse-glow green" />
+            <div className="device-badge-sidebar-info">
+              <h4>Agroguard Engine</h4>
+              <p>AI Service Online</p>
             </div>
           </div>
         </div>
+      </aside>
 
-        {/* ── Intruder Control ── */}
-        <div className="card">
-          <h2>🔒 Intruder Control</h2>
-          <p>
-            Arm or disarm PIR intruder detection. On detection the image is
-            sent to Telegram <em>and</em> stored on this dashboard.
-          </p>
+      {/* ── Mobile Header Bar ── */}
+      <header className="mobile-header">
+        <div className="mobile-logo">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+          </svg>
+          <h1>Agro<span>guard AI</span></h1>
+        </div>
+        <button
+          type="button"
+          className="mobile-menu-btn"
+          onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+          aria-label="Toggle menu"
+        >
+          {mobileMenuOpen ? <CloseIcon /> : <MenuIcon />}
+        </button>
+      </header>
 
-          <button
-            className={intruderArmed ? "btn danger" : "btn success"}
-            onClick={() => updateIntruderArmed(!intruderArmed)}
-          >
-            {intruderArmed ? "Disarm Intruder Mode" : "Arm Intruder Mode"}
-          </button>
+      {/* ── Main content pane ── */}
+      <main className="main-content">
+        
+        {/* Top Header bar */}
+        <div className="top-header">
+          <div>
+            <h2>
+              {activeSection === "overview" && "Dashboard Command Center"}
+              {activeSection === "analysis" && "Crop Plant Disease Analysis"}
+              {activeSection === "history" && "Diagnostics History & Log Images"}
+            </h2>
+            <p>
+              {activeSection === "overview" && "Executive summary of crop health classifications statistics."}
+              {activeSection === "analysis" && "Capture leaf frames via camera or drop image files for classification."}
+              {activeSection === "history" && "Browse past records, predictions scores, and snapshots."}
+            </p>
+          </div>
 
-          <button className="btn" onClick={manualIntruderSnap}>
-            {loadingIntruderSnap ? "Sending Command…" : "Manual Intruder Snap"}
-          </button>
+          <div className="top-header-actions">
+            <button
+              className="top-header-btn"
+              onClick={() => setDarkMode(!darkMode)}
+              title={darkMode ? "Use Light Theme" : "Use Dark Theme"}
+              aria-label="Toggle Theme"
+            >
+              {darkMode ? <SunIcon /> : <MoonIcon />}
+            </button>
+            <button
+              className="top-header-btn-text"
+              onClick={() => { signOut(auth); addToast("Signed out of station", "info"); }}
+            >
+              <LogOutIcon />
+              Exit Session
+            </button>
+          </div>
         </div>
 
-        {/* ── Disease Schedule ── */}
-        <div className="card">
-          <h2>🌿 Disease Detection Schedule</h2>
-          <p>
-            Set how often the ESP32-CAM should capture plant images and how
-            long the schedule should run.
-          </p>
+        {/* ────────────────────────────────────────────────── */}
+        {/* VIEW 1: OVERVIEW PAGE */}
+        {/* ────────────────────────────────────────────────── */}
+        {activeSection === "overview" && (
+          <div style={{ animation: "fadeIn 0.3s ease" }}>
+            <div className="overview-intro-card">
+              <span>Agroguard AI Hub</span>
+              <h3>Precision Plant Diagnostic Engine</h3>
+              <p>
+                Run automated visual checks using the Hugging Face plant classification model. Drag files or use your live camera streams to evaluate leaf conditions in real-time.
+              </p>
+            </div>
 
-          <label>
-            Interval between snaps (seconds)
-            <input
-              type="number"
-              min="10"
-              value={intervalSec}
-              onChange={(e) => setIntervalSec(e.target.value)}
-            />
-          </label>
-
-          <label>
-            Duration (minutes)
-            <input
-              type="number"
-              min="1"
-              value={durationMin}
-              onChange={(e) => setDurationMin(e.target.value)}
-            />
-          </label>
-
-          <button className="btn" onClick={saveScheduleSettings}>
-            Save Schedule Settings
-          </button>
-
-          <button
-            className={scheduleActive ? "btn danger" : "btn success"}
-            onClick={() => updateScheduleActive(!scheduleActive)}
-          >
-            {scheduleActive ? "Stop Disease Schedule" : "Start Disease Schedule"}
-          </button>
-        </div>
-
-        {/* ── Manual Disease Snap (ESP captures) ── */}
-        <div className="card">
-          <h2>📸 Manual Disease Snap</h2>
-          <p>
-            Tell the ESP32-CAM to capture a plant image now. The image is sent
-            directly to Hugging Face — only the result is shown here.
-          </p>
-
-          <button className="btn success" onClick={manualDiseaseSnap}>
-            {loadingDiseaseSnap
-              ? "Sending Command…"
-              : "Snap for Disease Detection"}
-          </button>
-        </div>
-
-        {/* ── Manual Plant-Image Upload ── */}
-        <div className="card">
-          <h2>📤 Upload Plant Image for Analysis</h2>
-          <p>
-            Upload a plant photo from your device. It will be sent to Hugging
-            Face via the ESP32 and the result will appear below and on
-            Telegram.
-          </p>
-
-          {/* Hidden file input */}
-          <input
-            id="plantFileInput"
-            ref={plantFileInputRef}
-            type="file"
-            accept="image/*"
-            style={{ display: "none" }}
-            onChange={handlePlantFileChange}
-          />
-
-          <button
-            className="btn success"
-            disabled={loadingPlantUpload}
-            onClick={() => plantFileInputRef.current?.click()}
-          >
-            {loadingPlantUpload ? "Uploading…" : "Choose & Upload Plant Image"}
-          </button>
-
-          {plantUploadResult && (
-            <div className="resultBox" style={{ marginTop: "14px" }}>
-              <div>
-                <span>Label</span>
-                <strong>{plantUploadResult.label || "—"}</strong>
+            <div className="overview-stats-grid">
+              <div className="stat-card" onClick={() => setActiveSection("analysis")}>
+                <div className="stat-card-header">
+                  <span className="stat-card-title">Diagnostics Status</span>
+                  <div className="stat-card-icon"><ShieldIcon /></div>
+                </div>
+                <div className="stat-card-value">Engine Active</div>
+                <p className="stat-card-desc">Hugging Face API connected</p>
               </div>
-              <div>
-                <span>Confidence</span>
-                <strong>{manualConfidencePercent}%</strong>
+
+              <div className="stat-card" onClick={() => setActiveSection("history")}>
+                <div className="stat-card-header">
+                  <span className="stat-card-title">Scan Log Count</span>
+                  <div className="stat-card-icon"><HistoryIcon /></div>
+                </div>
+                <div className="stat-card-value">{diseaseHistory.length} Total Logs</div>
+                <p className="stat-card-desc">Stored logs in Firebase RTDB</p>
               </div>
-              <div>
-                <span>Time</span>
-                <strong>{plantUploadResult.timestamp || "—"}</strong>
+
+              <div className="stat-card" onClick={() => setActiveSection("history")}>
+                <div className="stat-card-header">
+                  <span className="stat-card-title">Latest Diagnosis</span>
+                  <div className="stat-card-icon"><ScanIcon /></div>
+                </div>
+                <div className="stat-card-value" style={{ textTransform: 'capitalize' }}>{latestDiseaseEvent?.label || "No scans yet"}</div>
+                <p className="stat-card-desc">
+                  {latestDiseaseEvent
+                    ? `${formatConfidence(latestDiseaseEvent.confidence)} confidence`
+                    : "Ready for scan"}
+                </p>
               </div>
-              {plantUploadResult.imageUrl && (
-                <div className="span-two">
-                  <span>Uploaded Image</span>
-                  <a
-                    href={plantUploadResult.imageUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="img-link"
+            </div>
+
+            <div className="overview-quick-actions">
+              <h4>Classification Overrides</h4>
+              <div className="quick-actions-btn-grid">
+                <button type="button" className="btn-primary" onClick={() => setActiveSection("analysis")}>
+                  <ScanIcon />
+                  Open Plant Diagnosis
+                </button>
+                <button type="button" className="btn-outline" onClick={() => setActiveSection("history")}>
+                  <HistoryIcon />
+                  Review Diagnosis History
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ────────────────────────────────────────────────── */}
+        {/* VIEW 2: PLANT DIAGNOSIS (CAMERA SNAP / UPLOAD) */}
+        {/* ────────────────────────────────────────────────── */}
+        {activeSection === "analysis" && (
+          <div className="section-grid" style={{ animation: "fadeIn 0.3s ease" }}>
+            
+            {/* Live Camera Snap Section */}
+            <div className="dashboard-card">
+              <div className="card-header-block">
+                <h3>Live Camera Capture</h3>
+                <p>Use your laptop/phone camera to snap leaf photos directly from the browser viewport.</p>
+              </div>
+              <div className="card-body-block">
+                <div className="camera-view-container">
+                  {cameraActive ? (
+                    <>
+                      <div className="camera-viewport">
+                        <video ref={videoRef} autoPlay playsInline />
+                        <div className="camera-target-reticle" />
+                      </div>
+                      <div className="camera-actions-row">
+                        <button 
+                          className="btn-primary" 
+                          onClick={captureCameraSnapshot}
+                          disabled={loadingPlantUpload}
+                        >
+                          {loadingPlantUpload ? <div className="spinner" /> : <ScanIcon />}
+                          Snap & Diagnose
+                        </button>
+                        <button 
+                          className="btn-outline" 
+                          onClick={stopCamera}
+                          disabled={loadingPlantUpload}
+                        >
+                          Turn Off Camera
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <div style={{ padding: '40px 20px', textAlign: 'center', width: '100%' }}>
+                      <ScanIcon style={{ width: '32px', height: '32px', color: 'var(--text-sub)', marginBottom: '12px' }} />
+                      <h4>Live Camera Feed is Inactive</h4>
+                      <p style={{ color: 'var(--text-muted)', marginBottom: '20px' }}>Activate camera stream to snap snapshots directly.</p>
+                      <button 
+                        className="btn-primary" 
+                        onClick={startCamera}
+                        disabled={loadingPlantUpload}
+                        style={{ maxWidth: '240px', margin: '0 auto' }}
+                      >
+                        Start Camera Device
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Drag & Drop File Upload Section */}
+            <div className="dashboard-card">
+              <div className="card-header-block">
+                <h3>Drag & Drop File Upload</h3>
+                <p>Drag an image file or browse locally to submit leaf photos for classification.</p>
+              </div>
+              <div className="card-body-block" style={{ display: 'flex', alignItems: 'center' }}>
+                <input
+                  id="plantFileInput"
+                  ref={plantFileInputRef}
+                  type="file"
+                  accept="image/*"
+                  style={{ display: "none" }}
+                  onChange={handlePlantFileChange}
+                />
+
+                <div 
+                  className={`upload-dropzone ${dragActive ? "drag-active" : ""}`}
+                  onDragEnter={handleDrag}
+                  onDragOver={handleDrag}
+                  onDragLeave={handleDrag}
+                  onDrop={handleDrop}
+                  onClick={() => !loadingPlantUpload && plantFileInputRef.current?.click()}
+                >
+                  {loadingPlantUpload ? (
+                    <div className="upload-preview-container">
+                      <div className="spinner spinner-accent" style={{ width: '36px', height: '36px', borderWidth: '3px', marginBottom: '8px' }} />
+                      <h4>Processing Upload...</h4>
+                      <p>Calculating leaf classification markers</p>
+                    </div>
+                  ) : (
+                    <>
+                      <UploadIcon className="upload-dropzone-icon" />
+                      <h4>Drag & Drop Leaf image here</h4>
+                      <p>or click to browse local files</p>
+                    </>
+                  )}
+                </div>
+              </div>
+            </div>
+
+          </div>
+        )}
+
+        {/* ────────────────────────────────────────────────── */}
+        {/* VIEW 3: DIAGNOSIS HISTORY */}
+        {/* ────────────────────────────────────────────────── */}
+        {activeSection === "history" && (
+          <div className="dashboard-card" style={{ animation: "fadeIn 0.3s ease" }}>
+            <div className="card-header-block">
+              <h3>Diagnosis Logs & Classification Records</h3>
+              <p>Filter historical files log details, review classification details, and inspect full snapshots.</p>
+            </div>
+            
+            <div className="card-body-block">
+              
+              <div className="history-header-actions" style={{ justifyContent: 'flex-end' }}>
+                <div className="table-pagination">
+                  <button 
+                    className="pagination-btn" 
+                    onClick={() => setDiseasePage(Math.max(0, activeDiseasePage - 1))}
+                    disabled={activeDiseasePage === 0}
+                    aria-label="Previous page"
                   >
-                    🔗 View Uploaded Plant Image
-                  </a>
+                    <ChevronLeftIcon />
+                  </button>
+                  <small style={{ fontWeight: 600 }}>Page {activeDiseasePage + 1} of {diseasePageCount}</small>
+                  <button 
+                    className="pagination-btn" 
+                    onClick={() => setDiseasePage(activeDiseasePage + 1)}
+                    disabled={activeDiseasePage >= diseasePageCount - 1}
+                    aria-label="Next page"
+                  >
+                    <ChevronRightIcon />
+                  </button>
+                </div>
+              </div>
+
+              {currentDiseaseEvents.length > 0 ? (
+                <div className="table-responsive">
+                  <table className="custom-modern-table">
+                    <thead>
+                      <tr>
+                        <th>Captured Time</th>
+                        <th>Data Source</th>
+                        <th>Diagnosed Label</th>
+                        <th>Model Accuracy</th>
+                        <th>Camera Frame</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {currentDiseaseEvents.map((evt, idx) => {
+                        const conf = formatConfidence(evt.confidence);
+                        const imgStr = evt.imageBase64 || evt.imageUrl;
+                        const displayImg = getDisplayImageSrc(imgStr);
+                        
+                        // Custom color class mapping for labels
+                        const lbl = String(evt.label).toLowerCase();
+                        let tagClass = "tag-badge info";
+                        if (lbl.includes("healthy")) {
+                          tagClass = "tag-badge success";
+                        } else if (lbl.includes("rust") || lbl.includes("scab") || lbl.includes("rot")) {
+                          tagClass = "tag-badge danger";
+                        } else if (lbl !== "unknown" && lbl !== "n/a") {
+                          tagClass = "tag-badge warning";
+                        }
+
+                        return (
+                          <tr key={evt.timestamp || idx}>
+                            <td style={{ fontWeight: 600 }}>{evt.timestamp || "N/A"}</td>
+                            <td>
+                              <span style={{ textTransform: 'capitalize', fontSize: '13px', margin: 0, fontWeight: 500 }}>
+                                {evt.source || "N/A"}
+                              </span>
+                            </td>
+                            <td>
+                              <span className={tagClass} style={{ textTransform: 'capitalize' }}>
+                                {evt.label || "N/A"}
+                              </span>
+                            </td>
+                            <td style={{ fontFamily: 'var(--font-heading)', fontWeight: '600' }}>{conf}</td>
+                            <td>
+                              {displayImg ? (
+                                <button
+                                  type="button"
+                                  className="btn-outline"
+                                  style={{ margin: 0, padding: "6px 12px", fontSize: "12px", height: "30px", width: "auto" }}
+                                  onClick={() => setImagePreview({ src: displayImg, title: `Crop Health Diagnosis - ${evt.label || "Leaf snapshot"}` })}
+                                >
+                                  Inspect Frame
+                                </button>
+                              ) : (
+                                <span style={{ fontSize: '12px', color: 'var(--text-sub)' }}>No Frame</span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <div style={{ padding: '60px 20px', textAlign: 'center', border: '1px dashed var(--border-color)', borderRadius: 'var(--radius-lg)' }}>
+                  <ScanIcon style={{ width: '32px', height: '32px', color: 'var(--text-sub)', marginBottom: '8px' }} />
+                  <p style={{ margin: 0, color: 'var(--text-muted)' }}>No crop disease classification records found in hub data.</p>
                 </div>
               )}
+
             </div>
-          )}
-        </div>
+          </div>
+        )}
 
-        {/* ── Latest Disease Result ── */}
-        <div className="card wide">
-          <h2>🌱 Latest Disease Detection Result</h2>
+        {/* Footer info note */}
+        <footer className="app-footer">
+          <p>
+            Agroguard AI &bull; Smart Crop Diagnostic Telemetry Console &bull; Realtime Diagnostics
+          </p>
+        </footer>
+      </main>
 
-          {diseaseLatest ? (
-            <div className="resultBox">
-              <div>
-                <span>Label</span>
-                <strong>{diseaseLatest.label || "No label yet"}</strong>
-              </div>
-              <div>
-                <span>Confidence</span>
-                <strong>{confidencePercent}%</strong>
-              </div>
-              <div>
-                <span>Source</span>
-                <strong>{diseaseLatest.source || "N/A"}</strong>
-              </div>
-              <div>
-                <span>Time</span>
-                <strong>{diseaseLatest.timestamp || "N/A"}</strong>
-              </div>
+      {/* ── Image Overlay Preview dialog ── */}
+      {imagePreview && (
+        <div 
+          className="overlay-container" 
+          role="dialog" 
+          aria-modal="true" 
+          aria-label="Image preview"
+          onClick={() => setImagePreview(null)}
+        >
+          <div className="modal-content-card" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>{imagePreview.title}</h3>
+              <button
+                type="button"
+                className="top-header-btn"
+                style={{ width: '32px', height: '32px', borderRadius: '50%' }}
+                onClick={() => setImagePreview(null)}
+                aria-label="Close modal"
+              >
+                <CloseIcon />
+              </button>
             </div>
-          ) : (
-            <p>No disease result yet.</p>
-          )}
-        </div>
-
-        {/* ── Latest Intruder Event ── */}
-        <div className="card wide">
-          <h2>🚨 Latest Intruder Event</h2>
-
-          {intruderLatest ? (
-            <div className="resultBox">
-              <div>
-                <span>Event</span>
-                <strong>{intruderLatest.event || "No event yet"}</strong>
-              </div>
-              <div>
-                <span>Source</span>
-                <strong>{intruderLatest.source || "N/A"}</strong>
-              </div>
-              <div>
-                <span>Telegram Sent</span>
-                <strong>{intruderLatest.telegramSent ? "✅ Yes" : "❌ No"}</strong>
-              </div>
-              <div>
-                <span>Time</span>
-                <strong>{intruderLatest.timestamp || "N/A"}</strong>
-              </div>
-
-              {/* Intruder image link — opens full image in a new tab */}
-              {intruderImageUrl && (
-                <div className="span-two">
-                  <span>Captured Image</span>
-                  <a
-                    href={intruderImageUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="img-link"
-                  >
-                    🔗 View Intruder Image
-                  </a>
-                </div>
-              )}
+            <div className="modal-body">
+              <img src={imagePreview.src} alt={imagePreview.title} />
             </div>
-          ) : (
-            <p>No intruder event yet.</p>
-          )}
+          </div>
         </div>
-      </section>
+      )}
 
-      <footer>
-        <p>
-          Plant images are analysed in the cloud — only the result is stored on
-          the dashboard. Intruder images are sent to Telegram and displayed
-          here as a secure link.
-        </p>
-      </footer>
+      {/* ── Animated Toast Container ── */}
+      <div className="toast-overlay-container" aria-live="polite">
+        {toasts.map((toast) => {
+          let Icon = InfoIcon;
+          if (toast.type === "success") Icon = CheckIcon;
+          if (toast.type === "error") Icon = ErrorIcon;
+
+          return (
+            <div key={toast.id} className={`toast-item toast-${toast.type}`}>
+              <div className="toast-icon-wrapper">
+                <Icon />
+              </div>
+              <div className="toast-content-wrapper">
+                <h5>
+                  {toast.type === "success" && "Action Completed"}
+                  {toast.type === "error" && "Operation Error"}
+                  {toast.type === "info" && "Station Update"}
+                </h5>
+                <p>{toast.message}</p>
+              </div>
+              <button 
+                type="button"
+                className="toast-close-btn" 
+                onClick={() => removeToast(toast.id)}
+                aria-label="Dismiss notification"
+              >
+                <CloseIcon />
+              </button>
+            </div>
+          );
+        })}
+      </div>
+
     </div>
   );
 }
