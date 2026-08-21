@@ -251,9 +251,11 @@ export default function App() {
   const [darkMode, setDarkMode] = useState(true);
   const [activeSection, setActiveSection] = useState("overview");
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
   // ── Toast Alert state ─────────────────────────
   const [toasts, setToasts] = useState([]);
+  const [analysisResult, setAnalysisResult] = useState(null);
 
   // ── Drag & drop upload state ──────────────────
   const [dragActive, setDragActive] = useState(false);
@@ -291,7 +293,7 @@ export default function App() {
       return undefined;
     }
 
-    const unsubDisease = onValue(dbRef(db, "disease/history"), (snap) => {
+    const unsubDisease = onValue(dbRef(db, `users/${user.uid}/disease/history`), (snap) => {
       setDiseaseHistory(toSortedEventList(snap.val()));
     });
 
@@ -371,7 +373,7 @@ export default function App() {
       });
 
       if (!response.ok) {
-        throw new Error(`Hugging Face returned HTTP ${response.status}`);
+        throw new Error(`Agroguard service returned HTTP ${response.status}`);
       }
 
       const result = await response.json();
@@ -386,10 +388,10 @@ export default function App() {
       };
 
       const eventKey = String(Date.now());
-      await set(dbRef(db, "disease/latest"), diseaseEvent);
-      await set(dbRef(db, `disease/history/${eventKey}`), diseaseEvent);
+      await set(dbRef(db, `users/${user.uid}/disease/latest`), diseaseEvent);
+      await set(dbRef(db, `users/${user.uid}/disease/history/${eventKey}`), diseaseEvent);
 
-      addToast("Plant photo analyzed successfully.", "success");
+      setAnalysisResult({ ...diseaseEvent });
     } catch (err) {
       console.error("Plant upload failed:", err);
       addToast("Analysis failed: " + err.message, "error");
@@ -510,7 +512,7 @@ export default function App() {
             <div className="auth-hero-quote">
               <h3>Precision agriculture crop health & leaf disease classification</h3>
               <p>
-                Capture leaf snapshots in real-time or upload photos to classify crop infections instantly using Hugging Face AI.
+                Capture leaf snapshots in real-time or upload photos to analyze crop health instantly using Agroguard AI.
               </p>
             </div>
           </div>
@@ -586,10 +588,21 @@ export default function App() {
     <div className="app-container">
       
       {/* ── Desktop Sidebar ── */}
-      <aside className={`sidebar ${mobileMenuOpen ? "mobile-open" : ""}`}>
+      <aside className={`sidebar ${sidebarCollapsed ? "collapsed" : ""} ${mobileMenuOpen ? "mobile-open" : ""}`}>
         <div className="sidebar-logo">
-          <img src="/agroguard-logo.jpeg" alt="AgrouGuard AI logo" />
-          <h1>Agro<span>guard AI</span></h1>
+          <div className="sidebar-brand-wrapper">
+            <img src="/agroguard-logo.jpeg" alt="AgrouGuard AI logo" />
+            <h1 className="logo-text">Agro<span>guard AI</span></h1>
+          </div>
+          <button
+            type="button"
+            className="sidebar-collapse-toggle-btn"
+            onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
+            title={sidebarCollapsed ? "Expand Sidebar" : "Collapse Sidebar"}
+            aria-label="Toggle sidebar width"
+          >
+            <MenuIcon />
+          </button>
         </div>
 
         <nav className="sidebar-nav">
@@ -599,7 +612,7 @@ export default function App() {
             onClick={() => { setActiveSection("overview"); setMobileMenuOpen(false); }}
           >
             <DashboardIcon />
-            Overview
+            <span>Overview</span>
           </button>
           <button
             type="button"
@@ -607,7 +620,7 @@ export default function App() {
             onClick={() => { setActiveSection("analysis"); setMobileMenuOpen(false); }}
           >
             <ScanIcon />
-            Plant Diagnosis
+            <span>Plant Diagnosis</span>
           </button>
           <button
             type="button"
@@ -615,7 +628,7 @@ export default function App() {
             onClick={() => { setActiveSection("history"); setMobileMenuOpen(false); }}
           >
             <HistoryIcon />
-            Diagnosis History
+            <span>Diagnosis History</span>
           </button>
         </nav>
 
@@ -647,7 +660,7 @@ export default function App() {
       </header>
 
       {/* ── Main content pane ── */}
-      <main className="main-content">
+      <main className={`main-content ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
         
         {/* Top Header bar */}
         <div className="top-header">
@@ -689,10 +702,10 @@ export default function App() {
         {activeSection === "overview" && (
           <div style={{ animation: "fadeIn 0.3s ease" }}>
             <div className="overview-intro-card">
-              <span>Agroguard AI Hub</span>
-              <h3>Precision Plant Diagnostic Engine</h3>
+              <span>Agroguard</span>
+              <h3>Crop Health Center</h3>
               <p>
-                Run automated visual checks using the Hugging Face plant classification model. Drag files or use your live camera streams to evaluate leaf conditions in real-time.
+                Evaluate plant health and analyze crop leaf conditions in real-time using Agroguard AI. Drag files or use your live camera streams to scan leaves.
               </p>
             </div>
 
@@ -703,7 +716,7 @@ export default function App() {
                   <div className="stat-card-icon"><ShieldIcon /></div>
                 </div>
                 <div className="stat-card-value">Engine Active</div>
-                <p className="stat-card-desc">Hugging Face API connected</p>
+                <p className="stat-card-desc">Agroguard service connected</p>
               </div>
 
               <div className="stat-card" onClick={() => setActiveSection("history")}>
@@ -718,7 +731,7 @@ export default function App() {
               <div className="stat-card" onClick={() => setActiveSection("history")}>
                 <div className="stat-card-header">
                   <span className="stat-card-title">Latest Diagnosis</span>
-                  <div className="stat-card-icon"><ScanIcon /></div>
+                  <div className="stat-card-icon"><CheckIcon /></div>
                 </div>
                 <div className="stat-card-value" style={{ textTransform: 'capitalize' }}>{latestDiseaseEvent?.label || "No scans yet"}</div>
                 <p className="stat-card-desc">
@@ -733,7 +746,6 @@ export default function App() {
               <h4>Classification Overrides</h4>
               <div className="quick-actions-btn-grid">
                 <button type="button" className="btn-primary" onClick={() => setActiveSection("analysis")}>
-                  <ScanIcon />
                   Open Plant Diagnosis
                 </button>
                 <button type="button" className="btn-outline" onClick={() => setActiveSection("history")}>
@@ -785,7 +797,6 @@ export default function App() {
                     </>
                   ) : (
                     <div style={{ padding: '40px 20px', textAlign: 'center', width: '100%' }}>
-                      <ScanIcon style={{ width: '32px', height: '32px', color: 'var(--text-sub)', marginBottom: '12px' }} />
                       <h4>Live Camera Feed is Inactive</h4>
                       <p style={{ color: 'var(--text-muted)', marginBottom: '20px' }}>Activate camera stream to snap snapshots directly.</p>
                       <button 
@@ -945,7 +956,6 @@ export default function App() {
                 </div>
               ) : (
                 <div style={{ padding: '60px 20px', textAlign: 'center', border: '1px dashed var(--border-color)', borderRadius: 'var(--radius-lg)' }}>
-                  <ScanIcon style={{ width: '32px', height: '32px', color: 'var(--text-sub)', marginBottom: '8px' }} />
                   <p style={{ margin: 0, color: 'var(--text-muted)' }}>No crop disease classification records found in hub data.</p>
                 </div>
               )}
@@ -986,6 +996,72 @@ export default function App() {
             </div>
             <div className="modal-body">
               <img src={imagePreview.src} alt={imagePreview.title} />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Analysis Result Popup Modal ── */}
+      {analysisResult && (
+        <div className="result-modal-backdrop" onClick={() => setAnalysisResult(null)}>
+          <div className="result-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="result-modal-header">
+              <h3>Diagnosis Result</h3>
+              <button
+                type="button"
+                className="result-modal-close-btn"
+                onClick={() => setAnalysisResult(null)}
+                aria-label="Close result"
+              >
+                <CloseIcon />
+              </button>
+            </div>
+
+            {analysisResult.imageUrl && (
+              <div className="result-modal-image-wrapper">
+                <img src={analysisResult.imageUrl} alt="Analyzed leaf" />
+              </div>
+            )}
+
+            <div className="result-modal-body">
+              <div className="result-modal-row">
+                <span className="result-modal-label">Diagnosis</span>
+                <span className="result-modal-value" style={{ textTransform: "capitalize" }}>
+                  {analysisResult.label}
+                </span>
+              </div>
+              <div className="result-modal-row">
+                <span className="result-modal-label">Confidence</span>
+                <span className="result-modal-value accent">
+                  {formatConfidence(analysisResult.confidence)}
+                </span>
+              </div>
+              <div className="result-modal-row">
+                <span className="result-modal-label">Scanned At</span>
+                <span className="result-modal-value">{analysisResult.timestamp}</span>
+              </div>
+              <div className="result-modal-row">
+                <span className="result-modal-label">Source</span>
+                <span className="result-modal-value">{analysisResult.source}</span>
+              </div>
+            </div>
+
+            <div className="result-modal-footer">
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={() => { setAnalysisResult(null); setActiveSection("history"); }}
+              >
+                <HistoryIcon />
+                View in History
+              </button>
+              <button
+                type="button"
+                className="btn-outline"
+                onClick={() => setAnalysisResult(null)}
+              >
+                Dismiss
+              </button>
             </div>
           </div>
         </div>
