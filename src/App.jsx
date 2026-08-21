@@ -6,8 +6,16 @@ import {
   signInWithPopup,
   signOut,
 } from "firebase/auth";
-import { ref as dbRef, onValue, set } from "firebase/database";
-import { auth, db } from "./firebase";
+import {
+  collection,
+  doc,
+  onSnapshot,
+  orderBy,
+  query,
+  serverTimestamp,
+  writeBatch,
+} from "firebase/firestore";
+import { auth, firestore } from "./firebase";
 
 const HF_PREDICT_URL = "https://AbdulraufIbrahim-plant-disease-api.hf.space/predict";
 
@@ -51,6 +59,8 @@ function getDisplayImageSrc(imageValue) {
 }
 
 function getEventTimeMs(event) {
+  if (typeof event?.createdAt?.toMillis === "function") return event.createdAt.toMillis();
+  if (typeof event?.createdAt?.seconds === "number") return event.createdAt.seconds * 1000;
   if (typeof event?.timestampEpoch === "number") return event.timestampEpoch * 1000;
   if (typeof event?.lastSeenEpoch === "number") return event.lastSeenEpoch * 1000;
   if (!event?.timestamp) return 0;
@@ -59,7 +69,9 @@ function getEventTimeMs(event) {
 }
 
 function toSortedEventList(data) {
-  return Object.values(data || {})
+  const events = Array.isArray(data) ? data : Object.values(data || {});
+
+  return events
     .filter((event) => event && typeof event === "object")
     .sort((a, b) => getEventTimeMs(b) - getEventTimeMs(a));
 }
@@ -284,21 +296,37 @@ export default function App() {
     return unsubscribe;
   }, []);
 
-  // Firebase Realtime DB History Listener
+  // Firestore History Listener
   useEffect(() => {
     if (!user) {
-      setTimeout(() => {
+      const clearHistoryTimer = window.setTimeout(() => {
         setDiseaseHistory([]);
       }, 0);
-      return undefined;
+      return () => window.clearTimeout(clearHistoryTimer);
     }
 
-    const unsubDisease = onValue(dbRef(db, `users/${user.uid}/disease/history`), (snap) => {
-      setDiseaseHistory(toSortedEventList(snap.val()));
-    });
+    const diseaseHistoryQuery = query(
+      collection(firestore, "users", user.uid, "diseaseHistory"),
+      orderBy("createdAt", "desc"),
+    );
+
+    const unsubscribeDiseaseHistory = onSnapshot(
+      diseaseHistoryQuery,
+      (snapshot) => {
+        const events = snapshot.docs.map((snapshotDoc) => ({
+          id: snapshotDoc.id,
+          ...snapshotDoc.data(),
+        }));
+        setDiseaseHistory(toSortedEventList(events));
+      },
+      (err) => {
+        console.error("Firestore history listener failed:", err);
+        setDiseaseHistory([]);
+      },
+    );
 
     return () => {
-      unsubDisease();
+      unsubscribeDiseaseHistory();
     };
   }, [user]);
 
@@ -362,6 +390,16 @@ export default function App() {
   const handlePlantFile = async (file) => {
     if (!file) return;
 
+    if (!user) {
+      addToast("Please sign in before running a crop scan.", "error");
+      return;
+    }
+
+    if (file.type && !file.type.startsWith("image/")) {
+      addToast("Please upload an image file for diagnosis.", "error");
+      return;
+    }
+
     setLoadingPlantUpload(true);
     try {
       const formData = new FormData();
@@ -377,21 +415,43 @@ export default function App() {
       }
 
       const result = await response.json();
-      const timestamp = new Date().toISOString().replace("T", " ").slice(0, 19);
+      const scannedAt = new Date();
+      const timestamp = scannedAt.toISOString().replace("T", " ").slice(0, 19);
+      const timestampEpoch = Math.floor(scannedAt.getTime() / 1000);
       const imageUrl = await readImageAsDataUrl(file);
       const diseaseEvent = {
         label: result.label || "unknown",
         confidence: Number(result.confidence || 0),
-        source: "dashboard upload",
+        source: file.name === "camera-snap.jpg" ? "camera capture" : "dashboard upload",
         timestamp,
+        timestampEpoch,
         imageUrl,
       };
+      const firestoreDiseaseEvent = {
+        ...diseaseEvent,
+        userId: user.uid,
+        userEmail: user.email || null,
+        createdAt: serverTimestamp(),
+      };
 
-      const eventKey = String(Date.now());
-      await set(dbRef(db, `users/${user.uid}/disease/latest`), diseaseEvent);
-      await set(dbRef(db, `users/${user.uid}/disease/history/${eventKey}`), diseaseEvent);
+      const historyDoc = doc(collection(firestore, "users", user.uid, "diseaseHistory"));
+      const latestDoc = doc(firestore, "users", user.uid, "disease", "latest");
+      const batch = writeBatch(firestore);
 
-      setAnalysisResult({ ...diseaseEvent });
+      batch.set(historyDoc, firestoreDiseaseEvent);
+      batch.set(
+        latestDoc,
+        {
+          ...firestoreDiseaseEvent,
+          historyId: historyDoc.id,
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true },
+      );
+      await batch.commit();
+
+      setAnalysisResult({ id: historyDoc.id, ...diseaseEvent });
+      addToast("Diagnosis saved to Firestore history", "success");
     } catch (err) {
       console.error("Plant upload failed:", err);
       addToast("Analysis failed: " + err.message, "error");
@@ -505,7 +565,7 @@ export default function App() {
       <div className="auth-page-container">
         <div className="auth-hero-panel">
           <div className="auth-hero-logo">
-            <img src="/agroguard-logo.jpeg" alt="AgrouGuard AI logo" />
+            <img src="/agroguard-logo.jpeg" alt="AgroGuard AI logo" />
             <h2>Agro<span>guard AI</span></h2>
           </div>
           <div className="auth-hero-content">
@@ -591,7 +651,7 @@ export default function App() {
       <aside className={`sidebar ${sidebarCollapsed ? "collapsed" : ""} ${mobileMenuOpen ? "mobile-open" : ""}`}>
         <div className="sidebar-logo">
           <div className="sidebar-brand-wrapper">
-            <img src="/agroguard-logo.jpeg" alt="AgrouGuard AI logo" />
+            <img src="/agroguard-logo.jpeg" alt="AgroGuard AI logo" />
             <h1 className="logo-text">Agro<span>guard AI</span></h1>
           </div>
           <button
@@ -646,7 +706,7 @@ export default function App() {
       {/* ── Mobile Header Bar ── */}
       <header className="mobile-header">
         <div className="mobile-logo">
-          <img src="/agroguard-logo.jpeg" alt="AgrouGuard AI logo" />
+          <img src="/agroguard-logo.jpeg" alt="AgroGuard AI logo" />
           <h1>Agro<span>guard AI</span></h1>
         </div>
         <button
@@ -725,7 +785,7 @@ export default function App() {
                   <div className="stat-card-icon"><HistoryIcon /></div>
                 </div>
                 <div className="stat-card-value">{diseaseHistory.length} Total Logs</div>
-                <p className="stat-card-desc">Stored logs in Firebase RTDB</p>
+                <p className="stat-card-desc">Stored logs in Cloud Firestore</p>
               </div>
 
               <div className="stat-card" onClick={() => setActiveSection("history")}>
@@ -956,7 +1016,7 @@ export default function App() {
                 </div>
               ) : (
                 <div style={{ padding: '60px 20px', textAlign: 'center', border: '1px dashed var(--border-color)', borderRadius: 'var(--radius-lg)' }}>
-                  <p style={{ margin: 0, color: 'var(--text-muted)' }}>No crop disease classification records found in hub data.</p>
+                  <p style={{ margin: 0, color: 'var(--text-muted)' }}>No crop disease classification records found in your Firestore history.</p>
                 </div>
               )}
 

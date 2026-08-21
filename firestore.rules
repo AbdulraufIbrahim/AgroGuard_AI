@@ -1,0 +1,19 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSignedInOwner(userId) {
+      return request.auth != null && request.auth.uid == userId;
+    }
+
+    function hasValidOwnerField(userId) {
+      return !request.resource.data.keys().hasAny(['userId'])
+        || request.resource.data.userId == userId;
+    }
+
+    match /users/{userId}/{document=**} {
+      allow read, delete: if isSignedInOwner(userId);
+      allow create, update: if isSignedInOwner(userId) && hasValidOwnerField(userId);
+    }
+  }
+}
